@@ -1,6 +1,6 @@
 """
-PDF to Excel Converter - Backend v3.1
-Convierte cualquier PDF a Excel con análisis inteligente dinámico
+PDF to Excel Converter - Backend v3.2
+Modo Análisis: Extrae información real y la organiza
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PDF to Excel Converter",
-    version="3.1.0"
+    version="3.2.0"
 )
 
 app.add_middleware(
@@ -46,7 +46,6 @@ def get_column_letter(idx: int) -> str:
 
 
 def decrypt_pdf(pdf_path: str, password: str = None) -> str:
-    """Intenta desencriptar un PDF con contraseña"""
     try:
         import pikepdf
         try:
@@ -55,7 +54,6 @@ def decrypt_pdf(pdf_path: str, password: str = None) -> str:
             return pdf_path
         except pikepdf.PasswordError:
             pass
-        
         if password:
             try:
                 pdf = pikepdf.open(pdf_path, password=password)
@@ -71,14 +69,12 @@ def decrypt_pdf(pdf_path: str, password: str = None) -> str:
 
 
 def try_ghostscript_decrypt(pdf_path: str, password: str = None) -> str:
-    """Intenta desencriptar con Ghostscript"""
     import subprocess
     output_path = pdf_path.replace('.pdf', '_decrypted.pdf')
     cmd = ['gs', '-q', '-dNOPAUSE', '-dBATCH', '-sDEVICE=pdfwrite', '-sOutputFile=' + output_path]
     if password:
         cmd.append(f'-sPDFPassword={password}')
     cmd.append(pdf_path)
-    
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=30)
         if result.returncode == 0 and os.path.exists(output_path):
@@ -89,7 +85,6 @@ def try_ghostscript_decrypt(pdf_path: str, password: str = None) -> str:
 
 
 def is_encrypted(pdf_path: str) -> bool:
-    """Detecta si un PDF está encriptado"""
     try:
         import pikepdf
         try:
@@ -105,7 +100,6 @@ def is_encrypted(pdf_path: str) -> bool:
 
 
 def ocr_space_extract(pdf_path: str) -> str:
-    """Extrae texto usando OCR.space API"""
     try:
         with open(pdf_path, 'rb') as f:
             response = requests.post(
@@ -119,7 +113,6 @@ def ocr_space_extract(pdf_path: str) -> str:
                 },
                 timeout=60
             )
-        
         if response.status_code == 200:
             result = response.json()
             if result.get('OCRExitCode') == 1:
@@ -133,11 +126,9 @@ def ocr_space_extract(pdf_path: str) -> str:
 
 
 def extract_with_pdfplumber(pdf_path: str) -> tuple:
-    """Extrae datos con pdfplumber"""
     text = ""
     tables = []
     words = []
-    
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
@@ -157,18 +148,14 @@ def extract_with_pdfplumber(pdf_path: str) -> tuple:
                     pass
     except Exception as e:
         logger.warning(f"pdfplumber falló: {e}")
-    
     return text, tables, words
 
 
 def text_to_dataframe(text: str) -> pd.DataFrame:
-    """Convierte texto a DataFrame"""
     if not text:
         return pd.DataFrame()
-    
     lines = text.split('\n')
     all_rows = []
-    
     for line in lines:
         line = line.strip()
         if not line:
@@ -177,27 +164,22 @@ def text_to_dataframe(text: str) -> pd.DataFrame:
         parts = [p.strip() for p in parts if p.strip()]
         if parts:
             all_rows.append(parts)
-    
     if not all_rows:
         return pd.DataFrame()
-    
     max_cols = max(len(row) for row in all_rows)
     normalized = []
     for row in all_rows:
         if len(row) < max_cols:
             row = list(row) + [''] * (max_cols - len(row))
         normalized.append(row[:max_cols])
-    
     df = pd.DataFrame(normalized)
     df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
     return df
 
 
 def tables_to_dataframe(tables: list) -> pd.DataFrame:
-    """Convierte tablas a DataFrame"""
     if not tables:
         return pd.DataFrame()
-    
     all_rows = []
     for table in tables:
         if not table:
@@ -206,495 +188,311 @@ def tables_to_dataframe(tables: list) -> pd.DataFrame:
             clean_row = [str(cell).strip() if cell else '' for cell in row]
             if any(clean_row):
                 all_rows.append(clean_row)
-    
     if not all_rows:
         return pd.DataFrame()
-    
     max_cols = max(len(row) for row in all_rows)
     normalized = []
     for row in all_rows:
         if len(row) < max_cols:
             row = list(row) + [''] * (max_cols - len(row))
         normalized.append(row[:max_cols])
-    
     df = pd.DataFrame(normalized)
     df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
     return df
 
 
 def words_to_dataframe(words: list) -> pd.DataFrame:
-    """Convierte palabras con posición a DataFrame"""
     if not words:
         return pd.DataFrame()
-    
     lines = {}
     for word in words:
         y = round(word['top'], -1)
         if y not in lines:
             lines[y] = []
         lines[y].append(word)
-    
     all_rows = []
     for y in sorted(lines.keys()):
         line_words = sorted(lines[y], key=lambda w: w['x0'])
         row = [w['text'] for w in line_words]
         if row:
             all_rows.append(row)
-    
     if not all_rows:
         return pd.DataFrame()
-    
     max_cols = max(len(row) for row in all_rows)
     normalized = []
     for row in all_rows:
         if len(row) < max_cols:
             row = list(row) + [''] * (max_cols - len(row))
         normalized.append(row[:max_cols])
-    
     df = pd.DataFrame(normalized)
     df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
     return df
 
 
 def smart_extract(pdf_path: str) -> pd.DataFrame:
-    """Extrae datos usando múltiples métodos"""
     text, tables, words = extract_with_pdfplumber(pdf_path)
-    
     df_tables = tables_to_dataframe(tables)
     df_text = text_to_dataframe(text)
     df_words = words_to_dataframe(words)
-    
     total_rows = len(df_tables) + len(df_text) + len(df_words)
-    
     if total_rows == 0:
         logger.info("Usando OCR...")
         ocr_text = ocr_space_extract(pdf_path)
         if ocr_text:
             return text_to_dataframe(ocr_text)
-    
     results = [
         ('tables', df_tables, len(df_tables)),
         ('text', df_text, len(df_text)),
         ('words', df_words, len(df_words))
     ]
-    
     results.sort(key=lambda x: x[2], reverse=True)
     best_method, best_df, _ = results[0]
-    
     if best_df.empty:
         ocr_text = ocr_space_extract(pdf_path)
         if ocr_text:
             return text_to_dataframe(ocr_text)
         return pd.DataFrame()
-    
     logger.info(f"Mejor método: {best_method} con {len(best_df)} filas")
     return best_df
 
 
-# === ANÁLISIS INTELIGENTE DINÁMICO ===
+# === ANÁLISIS INTELIGENTE ===
 
-def detect_document_type(text: str, df: pd.DataFrame) -> str:
-    """Detecta el tipo de documento"""
-    text_lower = text.lower()
-    
-    # Detectar banco/extracto bancario
-    bancos = ['bancolombia', 'davivienda', 'bbva', 'banco de bogotá', 'banco de occidente',
-              'banco popular', 'avianca', 'scotiabank', 'itau', 'popular', 'occidente',
-              'bogota', 'citibank', 'santander', 'bank of america', 'chase', 'wells fargo',
-              'extracto', 'estado de cuenta', 'cuenta de ahorros', 'cuenta corriente',
-              'saldo anterior', 'saldo actual', 'movimientos', 'transacciones']
-    
-    for banco in bancos:
-        if banco in text_lower:
-            return 'extracto_bancario'
-    
-    # Detectar factura de servicios públicos
-    servicios = ['epm', 'empresas públicas', 'gas natural', 'argos', 'claro', 'movistar',
-                 'tigo', 'directv', 'netflix', 'spotify', 'factura', 'consumo', 'lectura',
-                 'cargo fijo', 'subsidio', 'contribución', 'energía', 'acueducto',
-                 'alcantarillado', 'aseo', 'servicio', 'pago', 'período']
-    
-    for servicio in servicios:
-        if servicio in text_lower:
-            return 'factura_servicios'
-    
-    # Detectar factura comercial
-    factura_keywords = ['factura', 'nit', 'número de factura', 'fecha de emisión',
-                        'subtotal', 'iva', 'impuesto', 'total', 'proveedor',
-                        'cliente', 'vendedor', 'artículo', 'producto', 'cantidad',
-                        'precio unitario', 'descuento']
-    
-    count_factura = sum(1 for kw in factura_keywords if kw in text_lower)
-    if count_factura >= 3:
-        return 'factura_comercial'
-    
-    # Detectar nómina
-    nomina_keywords = ['nómina', 'nomina', 'salario', 'devengado', 'deducciones',
-                       'seguridad social', 'pensión', 'salud', 'arl', 'cesantías',
-                       'prima', 'vacaciones', 'auxilio', 'transporte']
-    
-    count_nomina = sum(1 for kw in nomina_keywords if kw in text_lower)
-    if count_nomina >= 3:
-        return 'nomina'
-    
-    # Detectar reporte/tabla genérica
-    if len(df) > 10:
-        return 'reporte'
-    
-    return 'documento_generico'
-
-
-def parse_currency(value: str) -> float:
-    """Convierte string de moneda a float"""
-    if not value:
+def parse_value(text: str) -> float:
+    """Extrae valor numérico de un texto"""
+    if not text:
         return 0.0
-    
-    value = str(value).replace('$', '').replace('€', '').replace('USD', '')
-    value = value.replace(',', '').replace('.', '').replace(' ', '')
-    value = value.replace('\t', '').replace('\n', '')
-    
-    sign = -1 if '-' in value or '(' in value else 1
-    numbers = re.findall(r'\d+', value)
-    
+    # Eliminar símbolos de moneda y espacios
+    text = str(text).replace('$', '').replace('€', '').replace(',', '').replace('.', '')
+    text = text.replace(' ', '').replace('\t', '').replace('\n', '')
+    # Buscar números
+    numbers = re.findall(r'-?\d+', text)
     if numbers:
-        return sign * float(''.join(numbers))
+        try:
+            return float(numbers[0])
+        except:
+            return 0.0
     return 0.0
 
 
-def categorize_transaction(description: str) -> tuple:
-    """Categoriza una transacción y devuelve (categoría, tipo)"""
-    desc = description.lower()
+def extract_all_values(df: pd.DataFrame, text: str) -> list:
+    """Extrae todos los valores numéricos del documento"""
+    values = []
     
-    # Categorías y keywords
-    categorias = {
-        'Alimentación': ['restaurante', 'café', 'pizza', 'hamburguesa', 'sushi', 'comida',
-                        'almuerzo', 'cena', 'domicilios', 'rappi', 'uber eats', 'menu',
-                        'domicilio', 'mercado', 'supermercado', 'éxito', 'd1', 'ara',
-                        'justo', 'comida', 'pan', 'postre'],
-        
-        'Transporte': ['uber', 'taxi', 'metro', 'bus', 'gasolina', 'parqueadero',
-                      'peaje', 'transmilenio', 'transporte', 'siti', 'didi', 'cabify',
-                      'combustible', 'carro', 'moto'],
-        
-        'Entretenimiento': ['netflix', 'spotify', 'prime', 'cine', 'concierto', 'teatro',
-                          'youtube', 'disney', 'hbo', 'pelicula', 'series', 'musica',
-                          'videojuego', 'playstation', 'xbox', 'steam'],
-        
-        'Compras': ['amazon', 'mercado', 'exito', 'falabella', 'alkosto', 'exito',
-                   'tienda', 'ropa', 'zapatos', 'electronica', 'muebles'],
-        
-        'Servicios': ['luz', 'agua', 'gas', 'internet', 'celular', 'telefono', 'epm',
-                     'claro', 'movistar', 'tigo', 'servicios', 'publicos'],
-        
-        'Salud': ['farmacia', 'medico', 'clinica', 'eps', 'drogueria', 'laboratorio',
-                 'doctor', 'cita', 'medicamento', 'salud'],
-        
-        'Educación': ['curso', 'universidad', 'colegio', 'libro', 'udemy', 'coursera',
-                     'escuela', 'estudio', 'clase', 'diplomado'],
-        
-        'Transferencias': ['nequi', 'daviplata', 'pse', 'transfer', 'bancolombia',
-                          'davivienda', 'bbva', 'banco', 'envio', 'recibido'],
-        
-        'Ingresos': ['salario', 'nomina', 'abono', 'deposito', 'pago recibido',
-                    'transferencia recibida', 'devolucion', 'reembolso', 'comision',
-                    'honorario', 'venta'],
-        
-        'Impuestos': ['impuesto', 'iva', 'retefuente', 'reteiva', 'predial', 'vehiculo',
-                      'declaracion', 'dian', 'renta'],
-        
-        'Hogar': ['arriendo', 'alquiler', 'mantenimiento', 'reparacion', 'hogar',
-                 'muebles', 'electrodomestico', 'cocina'],
-    }
-    
-    # Detectar tipo primero
-    tipo = 'GASTO'
-    ingresos_keywords = ['abono', 'deposito', 'recibido', 'salario', 'nomina',
-                        'devolucion', 'reembolso', 'transferencia recibida']
-    for kw in ingresos_keywords:
-        if kw in desc:
-            tipo = 'INGRESO'
-            break
-    
-    # Detectar categoría
-    for categoria, keywords in categorias.items():
-        for kw in keywords:
-            if kw in desc:
-                return categoria, tipo
-    
-    return 'Otros', tipo
-
-
-def analyze_bank_statement(df: pd.DataFrame, text: str) -> dict:
-    """Analiza un extracto bancario"""
-    transactions = []
-    total_ingresos = 0.0
-    total_gastos = 0.0
-    
-    # Buscar columnas con valores monetarios
-    value_cols = []
-    date_cols = []
-    desc_cols = []
-    
+    # Del DataFrame
     for col in df.columns:
-        sample = df[col].dropna().head(20).astype(str)
-        
-        # Detectar columna de valores
-        currency_count = sample.str.contains(r'\$|[\d,]+\.\d{2}', regex=True).sum()
-        if currency_count > len(sample) * 0.3:
-            value_cols.append(col)
-        
-        # Detectar columna de fechas
-        date_count = sample.str.contains(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', regex=True).sum()
-        if date_count > len(sample) * 0.3:
-            date_cols.append(col)
-        
-        # Detectar columna de descripción (texto más largo)
-        avg_len = sample.str.len().mean()
-        if avg_len > 15:
-            desc_cols.append(col)
+        for val in df[col]:
+            num = parse_value(str(val))
+            if num != 0:
+                values.append(num)
     
-    # Extraer transacciones
-    desc_col = desc_cols[0] if desc_cols else df.columns[0]
+    # Del texto
+    for line in text.split('\n'):
+        num = parse_value(line)
+        if num != 0:
+            values.append(num)
     
-    for idx, row in df.iterrows():
-        for col in value_cols:
-            value = parse_currency(str(row[col]))
-            if value != 0:
-                description = str(row[desc_col]) if desc_col in row.index else 'Sin descripción'
-                fecha = ''
-                for dc in date_cols:
-                    fecha = str(row[dc])
-                    break
-                
-                categoria, tipo = categorize_transaction(description)
-                
-                transactions.append({
-                    'Fecha': fecha,
-                    'Descripción': description[:100],
-                    'Tipo': tipo,
-                    'Categoría': categoria,
-                    'Valor': value
-                })
-                
-                if tipo == 'INGRESO':
-                    total_ingresos += abs(value)
-                else:
-                    total_gastos += abs(value)
-                
-                break  # Solo un valor por fila
-    
-    # Categorizar gastos
-    gastos_por_categoria = Counter()
-    for t in transactions:
-        if t['Tipo'] == 'GASTO':
-            gastos_por_categoria[t['Categoría']] += abs(t['Valor'])
-    
-    return {
-        'tipo_documento': 'Extracto Bancario',
-        'transactions': transactions,
-        'resumen': {
-            'total_ingresos': total_ingresos,
-            'total_gastos': total_gastos,
-            'balance': total_ingresos - total_gastos,
-            'num_transacciones': len(transactions)
-        },
-        'gastos_por_categoria': dict(gastos_por_categoria.most_common(10))
-    }
+    return values
 
 
-def analyze_utility_bill(df: pd.DataFrame, text: str) -> dict:
-    """Analiza una factura de servicios públicos"""
-    data = {
-        'tipo_documento': 'Factura de Servicios',
-        'datos_generales': {},
-        'conceptos': [],
-        'totales': {}
-    }
+def analyze_data(df: pd.DataFrame, text: str) -> dict:
+    """Analiza los datos extraídos y organiza la información"""
     
-    text_lower = text.lower()
-    
-    # Detectar tipo de servicio
-    if 'energ' in text_lower or 'electricidad' in text_lower or 'epm' in text_lower:
-        data['servicio'] = 'Energía'
-    elif 'acueducto' in text_lower or 'agua' in text_lower:
-        data['servicio'] = 'Acueducto'
-    elif 'gas' in text_lower:
-        data['servicio'] = 'Gas Natural'
-    elif 'alcantarillado' in text_lower:
-        data['servicio'] = 'Alcantarillado'
-    elif 'aseo' in text_lower or 'basura' in text_lower:
-        data['servicio'] = 'Aseo'
-    
-    # Extraer conceptos comunes
-    conceptos_patterns = {
-        'consumo': r'consumo\s+(\w+-\w+)\s+(\d+)\s+([\d.,]+)',
-        'cargo_fijo': r'cargo\s+fijo\s+(\w+-\w+)\s+([\d.,]+)',
-        'subsidio': r'subsidio\s+(-?[\d.,]+)',
-        'total': r'total\s+(\w+)?\s*\$?\s*([\d.,]+)',
-    }
-    
-    for concepto, pattern in conceptos_patterns.items():
-        matches = re.findall(pattern, text_lower)
-        if matches:
-            data['conceptos'].append({
-                'nombre': concepto.replace('_', ' ').title(),
-                'valores': matches
-            })
-    
-    # Buscar totales
-    total_match = re.search(r'total\s+(\w+)?\s*\$?\s*([\d.,]+)', text_lower)
-    if total_match:
-        data['totales']['total'] = total_match.group(2).replace('.', '').replace(',', '.')
-    
-    return data
-
-
-def analyze_invoice(df: pd.DataFrame, text: str) -> dict:
-    """Analiza una factura comercial"""
-    data = {
-        'tipo_documento': 'Factura Comercial',
-        'items': [],
-        'totales': {}
-    }
-    
-    # Buscar NIT, número de factura, etc.
-    nit_match = re.search(r'nit[:\s]*([\d.-]+)', text, re.IGNORECASE)
-    if nit_match:
-        data['nit'] = nit_match.group(1)
-    
-    factura_match = re.search(r'(?:factura|no\.?|número)[:\s]*([\w-]+)', text, re.IGNORECASE)
-    if factura_match:
-        data['numero_factura'] = factura_match.group(1)
-    
-    # Buscar items (productos/servicios)
-    # Intentar extraer de la tabla
-    if len(df) > 0:
-        for idx, row in df.iterrows():
-            item = {}
-            for col in df.columns:
-                item[col] = row[col]
-            data['items'].append(item)
-    
-    # Buscar totales
-    subtotal_match = re.search(r'subtotal[:\s]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
-    if subtotal_match:
-        data['totales']['subtotal'] = subtotal_match.group(1)
-    
-    iva_match = re.search(r'iva[:\s]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
-    if iva_match:
-        data['totales']['iva'] = iva_match.group(1)
-    
-    total_match = re.search(r'total[:\s]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
-    if total_match:
-        data['totales']['total'] = total_match.group(1)
-    
-    return data
-
-
-def analyze_generic_document(df: pd.DataFrame, text: str) -> dict:
-    """Analiza un documento genérico"""
-    return {
+    analysis = {
         'tipo_documento': 'Documento',
-        'datos': df.to_dict(orient='records')[:50],  # Primeras 50 filas
-        'resumen': {
-            'filas_totales': len(df),
-            'columnas': list(df.columns)
-        }
+        'total_filas': len(df),
+        'total_columnas': len(df.columns),
+        'columnas': [],
+        'resumen': {},
+        'datos_importantes': [],
+        'valores_encontrados': [],
+        'categorias': {},
+        'texto_completo': text[:5000] if text else ''
     }
-
-
-def smart_analyze(df: pd.DataFrame, text: str = "") -> dict:
-    """Analiza el documento y devuelve información estructurada"""
-    
-    # Combinar texto extraído con DataFrame
-    full_text = text + " " + " ".join([" ".join(str(x) for x in row) for _, row in df.iterrows()])
     
     # Detectar tipo de documento
-    doc_type = detect_document_type(full_text, df)
-    logger.info(f"Tipo detectado: {doc_type}")
+    text_lower = text.lower()
     
-    # Analizar según el tipo
-    if doc_type == 'extracto_bancario':
-        return analyze_bank_statement(df, full_text)
-    elif doc_type == 'factura_servicios':
-        return analyze_utility_bill(df, full_text)
-    elif doc_type == 'factura_comercial':
-        return analyze_invoice(df, full_text)
-    else:
-        return analyze_generic_document(df, full_text)
+    # Detectar banco
+    bancos = ['bancolombia', 'davivienda', 'bbva', 'banco de bogotá', 'banco de occidente',
+              'banco popular', 'avianca', 'scotiabank', 'itau', 'citibank', 'santander',
+              'extracto', 'estado de cuenta', 'cuenta de ahorros', 'cuenta corriente',
+              'saldo', 'movimiento', 'transaccion']
+    if any(b in text_lower for b in bancos):
+        analysis['tipo_documento'] = 'Extracto Bancario'
+    
+    # Detectar factura de servicios
+    servicios = ['epm', 'empresas públicas', 'gas natural', 'claro', 'movistar', 'tigo',
+                 'factura', 'consumo', 'lectura', 'cargo fijo', 'energía', 'acueducto',
+                 'alcantarillado', 'servicio público']
+    if any(s in text_lower for s in servicios):
+        analysis['tipo_documento'] = 'Factura de Servicios'
+    
+    # Detectar factura comercial
+    if any(k in text_lower for k in ['factura', 'nit', 'subtotal', 'iva', 'total']):
+        if analysis['tipo_documento'] == 'Documento':
+            analysis['tipo_documento'] = 'Factura Comercial'
+    
+    # Analizar columnas
+    for col in df.columns:
+        col_data = {
+            'nombre': col,
+            'tipo': 'texto',
+            'ejemplos': [],
+            'valores_unicos': 0,
+            'tiene_numeros': False,
+            'tiene_fechas': False
+        }
+        
+        sample = df[col].dropna().head(5).astype(str).tolist()
+        col_data['ejemplos'] = sample
+        
+        # Detectar tipo de columna
+        col_str = df[col].astype(str).str.cat(sep=' ')
+        
+        # Fechas
+        if re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', col_str):
+            col_data['tiene_fechas'] = True
+            col_data['tipo'] = 'fecha'
+        
+        # Valores monetarios
+        if re.search(r'\$|[\d,]+\.\d{2}', col_str):
+            col_data['tiene_numeros'] = True
+            col_data['tipo'] = 'valor'
+        
+        # Contar valores únicos
+        col_data['valores_unicos'] = df[col].nunique()
+        
+        analysis['columnas'].append(col_data)
+    
+    # Extraer valores numéricos importantes
+    all_values = extract_all_values(df, text)
+    if all_values:
+        # Filtrar valores razonables (entre 100 y 100 millones)
+        valores_filtrados = [v for v in all_values if 100 <= abs(v) <= 100000000]
+        if valores_filtrados:
+            analysis['valores_encontrados'] = sorted(set(valores_filtrados), reverse=True)[:20]
+            analysis['resumen']['valor_maximo'] = max(valores_filtrados)
+            analysis['resumen']['valor_minimo'] = min(valores_filtrados)
+            analysis['resumen']['total_valores'] = len(valores_filtrados)
+    
+    # Buscar totales en el texto
+    totales_pattern = r'(?:total|subtotal|saldo|cargo|abono|consumo)[:\s]*\$?\s*([\d.,]+)'
+    totales = re.findall(totales_pattern, text_lower)
+    if totales:
+        analysis['datos_importantes'].extend([
+            {'concepto': 'Total encontrado', 'valor': t}
+            for t in totales[:5]
+        ])
+    
+    # Buscar fechas
+    fechas = re.findall(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', text)
+    if fechas:
+        fechas_unicas = list(set(fechas))[:10]
+        analysis['datos_importantes'].append({
+            'concepto': 'Fechas encontradas',
+            'valor': ', '.join(fechas_unicas)
+        })
+    
+    # Buscar NIT/cédulas
+    nits = re.findall(r'\d{8,15}', text)
+    if nits:
+        nits_unicos = list(set(nits))[:5]
+        analysis['datos_importantes'].append({
+            'concepto': 'Números de identificación',
+            'valor': ', '.join(nits_unicos)
+        })
+    
+    # Categorizar filas por palabras clave
+    categorias = {}
+    keywords_categoria = {
+        'Ingresos': ['abono', 'deposito', 'pago recibido', 'transferencia recibida', 'salario'],
+        'Gastos': ['compra', 'pago', 'retiro', 'consumo', 'cargo'],
+        'Servicios': ['energia', 'agua', 'gas', 'internet', 'telefono', 'celular'],
+        'Alimentación': ['restaurante', 'cafe', 'mercado', 'supermercado'],
+        'Transporte': ['uber', 'taxi', 'gasolina', 'metro', 'bus'],
+    }
+    
+    for col in df.columns:
+        for idx, val in df[col].items():
+            val_str = str(val).lower()
+            for cat, keywords in keywords_categoria.items():
+                if any(kw in val_str for kw in keywords):
+                    if cat not in categorias:
+                        categorias[cat] = []
+                    categorias[cat].append(str(val))
+    
+    analysis['categorias'] = categorias
+    
+    return analysis
 
 
 def create_analysis_excel(df_raw: pd.DataFrame, analysis: dict) -> BytesIO:
-    """Crea Excel con análisis basado en el tipo de documento"""
+    """Crea Excel organizado con la información encontrada"""
     
     output = BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
-        # Hoja 1: Resumen
-        resumen_data = {'Concepto': [], 'Valor': []}
+        # Hoja 1: Resumen del Documento
+        resumen_rows = [
+            ['INFORMACIÓN DEL DOCUMENTO'],
+            ['Tipo de documento:', analysis.get('tipo_documento', 'Documento')],
+            ['Total filas:', analysis.get('total_filas', 0)],
+            ['Total columnas:', analysis.get('total_columnas', 0)],
+            ['']
+        ]
         
-        doc_type = analysis.get('tipo_documento', 'Documento')
-        resumen_data['Concepto'].append('Tipo de Documento')
-        resumen_data['Valor'].append(doc_type)
+        # Agregar datos importantes
+        if analysis.get('datos_importantes'):
+            resumen_rows.append(['DATOS IMPORTANTES:'])
+            for dato in analysis['datos_importantes']:
+                resumen_rows.append([dato.get('concepto', ''), dato.get('valor', '')])
+            resumen_rows.append([''])
         
-        if 'resumen' in analysis:
-            resumen = analysis['resumen']
-            if 'total_ingresos' in resumen:
-                resumen_data['Concepto'].append('Total Ingresos')
-                resumen_data['Valor'].append(f"${resumen['total_ingresos']:,.0f}")
-            if 'total_gastos' in resumen:
-                resumen_data['Concepto'].append('Total Gastos')
-                resumen_data['Valor'].append(f"${resumen['total_gastos']:,.0f}")
-            if 'balance' in resumen:
-                resumen_data['Concepto'].append('Balance')
-                resumen_data['Valor'].append(f"${resumen['balance']:,.0f}")
-            if 'num_transacciones' in resumen:
-                resumen_data['Concepto'].append('Número de Transacciones')
-                resumen_data['Valor'].append(str(resumen['num_transacciones']))
+        # Agregar valores encontrados
+        if analysis.get('valores_encontrados'):
+            resumen_rows.append(['VALORES ENCONTRADOS:'])
+            resumen_rows.append(['Valores principales:', ', '.join(map(str, analysis['valores_encontrados'][:10]))])
+            if 'valor_maximo' in analysis.get('resumen', {}):
+                resumen_rows.append(['Valor máximo:', f"${analysis['resumen']['valor_maximo']:,.0f}"])
+            if 'valor_minimo' in analysis.get('resumen', {}):
+                resumen_rows.append(['Valor mínimo:', f"${analysis['resumen']['valor_minimo']:,.0f}"])
+            resumen_rows.append([''])
         
-        # Gastos por categoría (si existe)
-        if 'gastos_por_categoria' in analysis:
-            resumen_data['Concepto'].append('')
-            resumen_data['Valor'].append('')
-            resumen_data['Concepto'].append('Gastos por Categoría')
-            resumen_data['Valor'].append('')
-            for cat, valor in analysis['gastos_por_categoria'].items():
-                resumen_data['Concepto'].append(f'  {cat}')
-                resumen_data['Valor'].append(f"${valor:,.0f}")
+        # Agregar categorías
+        if analysis.get('categorias'):
+            resumen_rows.append(['CATEGORÍAS ENCONTRADAS:'])
+            for cat, items in analysis['categorias'].items():
+                resumen_rows.append([f'{cat} ({len(items)} items):', items[0] if items else ''])
+            resumen_rows.append([''])
         
-        # Conceptos de factura (si existe)
-        if 'conceptos' in analysis:
-            resumen_data['Concepto'].append('')
-            resumen_data['Valor'].append('')
-            for concepto in analysis['conceptos']:
-                resumen_data['Concepto'].append(concepto['nombre'])
-                resumen_data['Valor'].append(str(concepto.get('valores', [''])[0]) if concepto.get('valores') else '')
+        # Agregar columnas detectadas
+        if analysis.get('columnas'):
+            resumen_rows.append(['COLUMNAS DETECTADAS:'])
+            for col in analysis['columnas'][:5]:  # Primeras 5 columnas
+                resumen_rows.append([col['nombre'], f"Tipo: {col['tipo']}, Ejemplos: {', '.join(str(x) for x in col['ejemplos'][:3])}"])
         
-        # Totales de factura
-        if 'totales' in analysis:
-            resumen_data['Concepto'].append('')
-            resumen_data['Valor'].append('')
-            for key, val in analysis['totales'].items():
-                resumen_data['Concepto'].append(key.title())
-                resumen_data['Valor'].append(f"${val}" if isinstance(val, str) else val)
+        df_resumen = pd.DataFrame(resumen_rows)
+        df_resumen.to_excel(writer, sheet_name='Resumen', index=False, header=False)
         
-        df_resumen = pd.DataFrame(resumen_data)
-        df_resumen.to_excel(writer, sheet_name='Resumen', index=False)
+        # Hoja 2: Categorías (si hay)
+        if analysis.get('categorias'):
+            cat_rows = []
+            for cat, items in analysis['categorias'].items():
+                for item in items[:50]:  # Máximo 50 items por categoría
+                    cat_rows.append({'Categoría': cat, 'Contenido': item})
+            if cat_rows:
+                df_cat = pd.DataFrame(cat_rows)
+                df_cat.to_excel(writer, sheet_name='Categorías', index=False)
         
-        # Hoja 2: Transacciones/Detalles
-        if 'transactions' in analysis and analysis['transactions']:
-            df_trans = pd.DataFrame(analysis['transactions'])
-            df_trans.to_excel(writer, sheet_name='Transacciones', index=False)
-        elif 'items' in analysis and analysis['items']:
-            df_items = pd.DataFrame(analysis['items'])
-            df_items.to_excel(writer, sheet_name='Items', index=False)
-        elif 'datos' in analysis:
-            df_datos = pd.DataFrame(analysis['datos'])
-            df_datos.to_excel(writer, sheet_name='Datos', index=False)
-        
-        # Hoja 3: Datos Completos
+        # Hoja 3: Datos Completos (raw)
         df_raw.to_excel(writer, sheet_name='Datos_Completos', index=False)
+        
+        # Hoja 4: Texto extraído (si hay)
+        if analysis.get('texto_completo'):
+            df_texto = pd.DataFrame({'Texto': analysis['texto_completo'].split('\n')})
+            df_texto.to_excel(writer, sheet_name='Texto_Extraído', index=False)
         
         # Formatear
         for sheet_name in writer.sheets:
@@ -708,7 +506,7 @@ def create_analysis_excel(df_raw: pd.DataFrame, analysis: dict) -> BytesIO:
                             max_length = len(str(cell.value))
                     except:
                         pass
-                adjusted_width = min(max_length + 2, 60)
+                adjusted_width = min(max_length + 2, 80)
                 ws.column_dimensions[column].width = adjusted_width
     
     output.seek(0)
@@ -719,7 +517,7 @@ def create_analysis_excel(df_raw: pd.DataFrame, analysis: dict) -> BytesIO:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "status": "running",
         "features": ["ocr", "password_support", "analysis_mode", "auto_detection"]
     }
@@ -764,14 +562,12 @@ async def convert_pdf(
                     status_code=400,
                     detail="Este PDF está protegido con contraseña. Por favor proporciona el password."
                 )
-            
             decrypted_path = decrypt_pdf(tmp_path, password)
             if not decrypted_path:
                 raise HTTPException(
                     status_code=400,
                     detail="No se pudo desencriptar el PDF. Verifica la contraseña."
                 )
-            
             if decrypted_path != tmp_path:
                 os.unlink(tmp_path)
                 tmp_path = decrypted_path
@@ -790,7 +586,6 @@ async def convert_pdf(
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name='Datos')
-                
                 worksheet = writer.sheets['Datos']
                 for idx in range(len(df.columns)):
                     col_letter = get_column_letter(idx)
@@ -802,12 +597,9 @@ async def convert_pdf(
                         worksheet.column_dimensions[col_letter].width = min(max_len + 2, 60)
                     except:
                         worksheet.column_dimensions[col_letter].width = 20
-                
                 worksheet.auto_filter.ref = worksheet.dimensions
-            
             output.seek(0)
             excel_filename = file.filename.replace('.pdf', '.xlsx')
-            
             return StreamingResponse(
                 output,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -816,11 +608,9 @@ async def convert_pdf(
         
         # Modo Análisis
         else:
-            analysis = smart_analyze(df, text)
+            analysis = analyze_data(df, text)
             output = create_analysis_excel(df, analysis)
-            
             excel_filename = file.filename.replace('.pdf', '_analisis.xlsx')
-            
             return StreamingResponse(
                 output,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -862,7 +652,6 @@ async def preview_pdf(
 
     try:
         encrypted = is_encrypted(tmp_path)
-        
         if encrypted:
             if password:
                 decrypted_path = decrypt_pdf(tmp_path, password)
@@ -870,7 +659,6 @@ async def preview_pdf(
                     os.unlink(tmp_path)
                     tmp_path = decrypted_path
                     encrypted = False
-        
         if encrypted:
             return {
                 "filename": file.filename,
@@ -881,7 +669,6 @@ async def preview_pdf(
             }
         
         df = smart_extract(tmp_path)
-        
         if df.empty:
             return {
                 "filename": file.filename,
@@ -892,7 +679,6 @@ async def preview_pdf(
             }
         
         preview = df.head(10).to_dict(orient='records')
-        
         return {
             "filename": file.filename,
             "encrypted": False,
@@ -900,7 +686,6 @@ async def preview_pdf(
             "columns": list(df.columns),
             "preview": preview
         }
-
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

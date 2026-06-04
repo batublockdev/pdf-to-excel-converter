@@ -1,12 +1,11 @@
 """
-PDF to Excel Converter - Backend v2.1
+PDF to Excel Converter - Backend v2.2
 Convierte cualquier PDF a Excel, incluyendo PDFs escaneados (OCR)
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import pdfplumber
 import pandas as pd
 from io import BytesIO
 import tempfile
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PDF to Excel Converter",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 app.add_middleware(
@@ -32,7 +31,7 @@ app.add_middleware(
 )
 
 # OCR.space API (Free: 25,000 requests/mes)
-OCR_SPACE_API_KEY = "K87736648888957"  # Free public key
+OCR_SPACE_API_KEY = "K87736648888957"
 
 
 def get_column_letter(idx: int) -> str:
@@ -46,7 +45,7 @@ def get_column_letter(idx: int) -> str:
 
 
 def ocr_space_extract(pdf_path: str) -> str:
-    """Extrae texto de PDF escaneado usando OCR.space API"""
+    """Extrae texto de PDF usando OCR.space API"""
     try:
         with open(pdf_path, 'rb') as f:
             response = requests.post(
@@ -54,9 +53,9 @@ def ocr_space_extract(pdf_path: str) -> str:
                 files={'file': f},
                 data={
                     'apikey': OCR_SPACE_API_KEY,
-                    'language': 'spa',  # Español
+                    'language': 'spa',
                     'isOverlayRequired': 'false',
-                    'OCREngine': '2',  # Engine más preciso
+                    'OCREngine': '2',
                 },
                 timeout=60
             )
@@ -64,140 +63,51 @@ def ocr_space_extract(pdf_path: str) -> str:
         if response.status_code == 200:
             result = response.json()
             if result.get('OCRExitCode') == 1:
-                text = result.get('ParsedResults', [{}])[0].get('ParsedText', '')
-                return text
+                parsed = result.get('ParsedResults', [])
+                if parsed:
+                    return parsed[0].get('ParsedText', '')
         return ""
     except Exception as e:
         logger.error(f"OCR error: {e}")
         return ""
 
 
-def is_scanned_pdf(pdf_path: str) -> bool:
-    """Detecta si un PDF es escaneado (solo imágenes)"""
+def extract_with_pdfplumber(pdf_path: str) -> tuple:
+    """Intenta extraer con pdfplumber, retorna (texto, tablas, words)"""
+    text = ""
+    tables = []
+    words = []
+    
     try:
+        import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages[:2]:
-                text = page.extract_text()
-                if text and len(text.strip()) > 50:
-                    return False
-        return True
-    except:
-        return True
+            for page in pdf.pages:
+                # Texto
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                
+                # Tablas
+                try:
+                    page_tables = page.extract_tables()
+                    tables.extend(page_tables)
+                except:
+                    pass
+                
+                # Palabras
+                try:
+                    page_words = page.extract_words()
+                    words.extend(page_words)
+                except:
+                    pass
+    except Exception as e:
+        logger.warning(f"pdfplumber falló: {e}")
+    
+    return text, tables, words
 
 
-def extract_all_text_structured(pdf_path: str) -> pd.DataFrame:
-    """Extrae TODO el texto y lo organiza"""
-    all_lines = []
-    
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if not text:
-                continue
-            
-            lines = text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = re.split(r'\s{2,}', line)
-                parts = [p.strip() for p in parts if p.strip()]
-                if parts:
-                    all_lines.append(parts)
-    
-    if not all_lines:
-        return pd.DataFrame()
-    
-    max_parts = max(len(line) for line in all_lines)
-    
-    rows = []
-    for line in all_lines:
-        if len(line) < max_parts:
-            line = list(line) + [''] * (max_parts - len(line))
-        rows.append(line[:max_parts])
-    
-    df = pd.DataFrame(rows)
-    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
-    
-    return df
-
-
-def extract_with_words(pdf_path: str) -> pd.DataFrame:
-    """Extrae usando posiciones de palabras"""
-    all_rows = []
-    
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            words = page.extract_words()
-            if not words:
-                continue
-            
-            lines = {}
-            for word in words:
-                y = round(word['top'], -1)
-                if y not in lines:
-                    lines[y] = []
-                lines[y].append(word)
-            
-            for y in sorted(lines.keys()):
-                line_words = sorted(lines[y], key=lambda w: w['x0'])
-                row = [w['text'] for w in line_words]
-                if row:
-                    all_rows.append(row)
-    
-    if not all_rows:
-        return pd.DataFrame()
-    
-    max_cols = max(len(row) for row in all_rows)
-    
-    normalized = []
-    for row in all_rows:
-        if len(row) < max_cols:
-            row = list(row) + [''] * (max_cols - len(row))
-        normalized.append(row[:max_cols])
-    
-    df = pd.DataFrame(normalized)
-    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
-    
-    return df
-
-
-def extract_tables_traditional(pdf_path: str) -> pd.DataFrame:
-    """Extrae tablas tradicionales"""
-    all_tables = []
-    
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            try:
-                tables = page.extract_tables()
-                for table in tables:
-                    if table and len(table) >= 2:
-                        for row in table:
-                            clean_row = [str(cell).strip() if cell else '' for cell in row]
-                            if any(clean_row):
-                                all_tables.append(clean_row)
-            except:
-                continue
-    
-    if not all_tables:
-        return pd.DataFrame()
-    
-    max_cols = max(len(row) for row in all_tables)
-    
-    normalized = []
-    for row in all_tables:
-        if len(row) < max_cols:
-            row = list(row) + [''] * (max_cols - len(row))
-        normalized.append(row[:max_cols])
-    
-    df = pd.DataFrame(normalized)
-    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
-    
-    return df
-
-
-def ocr_text_to_dataframe(text: str) -> pd.DataFrame:
-    """Convierte texto OCR a DataFrame"""
+def text_to_dataframe(text: str) -> pd.DataFrame:
+    """Convierte texto a DataFrame"""
     if not text:
         return pd.DataFrame()
     
@@ -208,7 +118,6 @@ def ocr_text_to_dataframe(text: str) -> pd.DataFrame:
         line = line.strip()
         if not line:
             continue
-        # Separar por espacios múltiples
         parts = re.split(r'\s{2,}', line)
         parts = [p.strip() for p in parts if p.strip()]
         if parts:
@@ -231,31 +140,102 @@ def ocr_text_to_dataframe(text: str) -> pd.DataFrame:
     return df
 
 
+def tables_to_dataframe(tables: list) -> pd.DataFrame:
+    """Convierte tablas a DataFrame"""
+    if not tables:
+        return pd.DataFrame()
+    
+    all_rows = []
+    for table in tables:
+        if not table:
+            continue
+        for row in table:
+            clean_row = [str(cell).strip() if cell else '' for cell in row]
+            if any(clean_row):
+                all_rows.append(clean_row)
+    
+    if not all_rows:
+        return pd.DataFrame()
+    
+    max_cols = max(len(row) for row in all_rows)
+    
+    normalized = []
+    for row in all_rows:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        normalized.append(row[:max_cols])
+    
+    df = pd.DataFrame(normalized)
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    return df
+
+
+def words_to_dataframe(words: list) -> pd.DataFrame:
+    """Convierte palabras con posición a DataFrame"""
+    if not words:
+        return pd.DataFrame()
+    
+    # Agrupar por línea Y
+    lines = {}
+    for word in words:
+        y = round(word['top'], -1)
+        if y not in lines:
+            lines[y] = []
+        lines[y].append(word)
+    
+    all_rows = []
+    for y in sorted(lines.keys()):
+        line_words = sorted(lines[y], key=lambda w: w['x0'])
+        row = [w['text'] for w in line_words]
+        if row:
+            all_rows.append(row)
+    
+    if not all_rows:
+        return pd.DataFrame()
+    
+    max_cols = max(len(row) for row in all_rows)
+    
+    normalized = []
+    for row in all_rows:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        normalized.append(row[:max_cols])
+    
+    df = pd.DataFrame(normalized)
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    return df
+
+
 def smart_extract(pdf_path: str) -> pd.DataFrame:
-    """Extrae datos usando múltiples métodos, incluyendo OCR"""
+    """Extrae datos usando múltiples métodos"""
     
-    # Verificar si es PDF escaneado
-    is_scanned = is_scanned_pdf(pdf_path)
-    logger.info(f"PDF escaneado: {is_scanned}")
+    # Intentar con pdfplumber primero
+    text, tables, words = extract_with_pdfplumber(pdf_path)
     
-    if is_scanned:
-        logger.info("Usando OCR para PDF escaneado...")
-        text = ocr_space_extract(pdf_path)
-        if text:
-            df = ocr_text_to_dataframe(text)
-            if not df.empty:
-                logger.info(f"OCR extrajo {len(df)} filas")
-                return df
+    # Crear DataFrames de cada método
+    df_tables = tables_to_dataframe(tables)
+    df_text = text_to_dataframe(text)
+    df_words = words_to_dataframe(words)
     
-    # Métodos tradicionales para PDFs con texto
-    df_tables = extract_tables_traditional(pdf_path)
-    df_text = extract_all_text_structured(pdf_path)
-    df_words = extract_with_words(pdf_path)
+    # Si pdfplumber no extrajo nada, usar OCR
+    total_rows = len(df_tables) + len(df_text) + len(df_words)
     
+    if total_rows == 0:
+        logger.info("pdfplumber no extrajo datos, usando OCR...")
+        ocr_text = ocr_space_extract(pdf_path)
+        if ocr_text:
+            df_ocr = text_to_dataframe(ocr_text)
+            if not df_ocr.empty:
+                logger.info(f"OCR extrajo {len(df_ocr)} filas")
+                return df_ocr
+    
+    # Elegir el mejor resultado
     results = [
-        ('tables', df_tables, len(df_tables) if not df_tables.empty else 0),
-        ('text', df_text, len(df_text) if not df_text.empty else 0),
-        ('words', df_words, len(df_words) if not df_words.empty else 0)
+        ('tables', df_tables, len(df_tables)),
+        ('text', df_text, len(df_text)),
+        ('words', df_words, len(df_words))
     ]
     
     results.sort(key=lambda x: x[2], reverse=True)
@@ -263,16 +243,20 @@ def smart_extract(pdf_path: str) -> pd.DataFrame:
     best_method, best_df, _ = results[0]
     
     if best_df.empty:
+        # Último recurso: OCR
+        logger.info("Intentando OCR como último recurso...")
+        ocr_text = ocr_space_extract(pdf_path)
+        if ocr_text:
+            return text_to_dataframe(ocr_text)
         return pd.DataFrame()
     
     logger.info(f"Mejor método: {best_method} con {len(best_df)} filas")
-    
     return best_df
 
 
 @app.get("/")
 async def root():
-    return {"message": "PDF to Excel Converter API", "version": "2.1.0", "status": "running", "ocr": "enabled"}
+    return {"message": "PDF to Excel Converter API", "version": "2.2.0", "status": "running", "ocr": "enabled"}
 
 
 @app.get("/health")
@@ -293,6 +277,8 @@ async def convert_pdf(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="El archivo está vacío")
         if not content.startswith(b'%PDF'):
             raise HTTPException(status_code=400, detail="No es un PDF válido")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
@@ -304,7 +290,7 @@ async def convert_pdf(file: UploadFile = File(...)):
         df = smart_extract(tmp_path)
         
         if df.empty:
-            raise HTTPException(status_code=400, detail="No se pudo extraer contenido del PDF. Si es un PDF escaneado, asegúrate de que tenga buena calidad.")
+            raise HTTPException(status_code=400, detail="No se pudo extraer contenido del PDF")
 
         logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
@@ -356,6 +342,8 @@ async def preview_pdf(file: UploadFile = File(...)):
         content = await file.read()
         if len(content) == 0 or not content.startswith(b'%PDF'):
             raise HTTPException(status_code=400, detail="PDF inválido")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 

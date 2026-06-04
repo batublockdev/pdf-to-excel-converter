@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="PDF to Excel Converter",
     description="Convierte estados de cuenta PDF a Excel limpio",
-    version="1.0.1"
+    version="1.0.2"
 )
 
 # CORS para frontend
@@ -32,6 +32,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def get_column_letter(idx: int) -> str:
+    """Convierte índice a letra de columna de Excel (A, B, ..., Z, AA, AB, ...)"""
+    result = ""
+    idx += 1  # Convertir a 1-indexed
+    while idx > 0:
+        idx -= 1
+        result = chr(65 + idx % 26) + result
+        idx //= 26
+    return result
 
 
 def extract_tables_pdfplumber(pdf_path: str) -> List:
@@ -97,7 +108,7 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "status": "running"
     }
 
@@ -155,7 +166,7 @@ async def convert_pdf(file: UploadFile = File(...)):
         if df.empty:
             raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos")
 
-        logger.info(f"Convertido: {len(df)} filas")
+        logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
         # Crear Excel en memoria
         output = BytesIO()
@@ -165,11 +176,15 @@ async def convert_pdf(file: UploadFile = File(...)):
             # Auto-ajustar columnas
             worksheet = writer.sheets['Datos']
             for idx, col in enumerate(df.columns):
-                max_length = max(
-                    df[col].astype(str).map(len).max(),
-                    len(str(col))
-                )
-                worksheet.column_dimensions[chr(65 + idx)].width = min(max_length + 2, 50)
+                col_letter = get_column_letter(idx)
+                try:
+                    max_length = max(
+                        df[col].astype(str).map(len).max(),
+                        len(str(col))
+                    )
+                    worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
+                except:
+                    worksheet.column_dimensions[col_letter].width = 15
 
         output.seek(0)
 

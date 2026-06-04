@@ -1,6 +1,6 @@
 """
-PDF to Excel Converter - Backend
-Convierte PDFs (estados de cuenta, facturas, tablas) a Excel limpio
+PDF to Excel Converter - Backend v2.0
+Convierte cualquier PDF a Excel extrayendo todo el contenido posible
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -13,19 +13,15 @@ import tempfile
 import os
 import logging
 import re
-from typing import List
 
-# Configuración
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PDF to Excel Converter",
-    description="Convierte estados de cuenta PDF a Excel limpio",
-    version="1.0.7"
+    version="2.0.0"
 )
 
-# CORS para frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,7 +32,6 @@ app.add_middleware(
 
 
 def get_column_letter(idx: int) -> str:
-    """Convierte índice a letra de columna de Excel"""
     result = ""
     idx += 1
     while idx > 0:
@@ -46,131 +41,178 @@ def get_column_letter(idx: int) -> str:
     return result
 
 
-def extract_tables_pdfplumber(pdf_path: str) -> List:
-    """Extrae tablas usando pdfplumber con múltiples estrategias"""
-    all_tables = []
-
+def extract_all_text_structured(pdf_path: str) -> pd.DataFrame:
+    """Extrae TODO el texto del PDF y lo organiza por líneas"""
+    all_lines = []
+    
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
-            try:
-                # Estrategia 1: Tablas con líneas
-                tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        # Filtrar tablas muy pequeñas
-                        if len(table) >= 2:
-                            all_tables.append({
-                                "page": page_num + 1,
-                                "data": table,
-                                "type": "lined"
-                            })
-
-                # Estrategia 2: Texto con patrones de factura
-                text = page.extract_text()
-                if text and (not tables or len(tables) == 0):
-                    # Detectar si es factura con patrones
-                    if any(kw in text for kw in ['Total', 'Consumo', 'Valor', '$', 'factura', 'periodo']):
-                        lines = text.split('\n')
-                        table_data = []
-                        for line in lines:
-                            if line.strip():
-                                # Separar por espacios múltiples o tabs
-                                parts = re.split(r'\s{2,}|\t', line.strip())
-                                if len(parts) >= 2:
-                                    table_data.append(parts)
-                        
-                        if len(table_data) >= 2:
-                            all_tables.append({
-                                "page": page_num + 1,
-                                "data": table_data,
-                                "type": "text-invoice"
-                            })
-
-            except Exception as e:
-                logger.warning(f"Error en página {page_num}: {e}")
-                continue
-
-    return all_tables
-
-
-def clean_and_organize_invoice(tables: List) -> pd.DataFrame:
-    """Organiza datos de factura en formato limpio"""
-    all_records = []
-    
-    for table_info in tables:
-        table = table_info["data"]
-        
-        for row in table:
-            if not row or not any(cell for cell in row if cell):
+            text = page.extract_text()
+            if not text:
                 continue
             
-            # Limpiar celdas
-            clean_row = []
-            for cell in row:
-                if cell:
-                    cell = str(cell).strip()
-                    # Limpiar caracteres extraños
-                    cell = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', cell)
-                    clean_row.append(cell)
-            
-            if clean_row:
-                all_records.append(clean_row)
+            lines = text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Separar por múltiples espacios (común en PDFs)
+                parts = re.split(r'\s{2,}', line)
+                
+                # Limpiar partes vacías
+                parts = [p.strip() for p in parts if p.strip()]
+                
+                if parts:
+                    all_lines.append({
+                        'pagina': page_num + 1,
+                        'contenido': line,
+                        'partes': parts
+                    })
     
-    if not all_records:
+    if not all_lines:
         return pd.DataFrame()
     
-    # Encontrar el número máximo de columnas
-    max_cols = max(len(row) for row in all_records)
+    # Encontrar el máximo número de columnas
+    max_parts = max(len(line['partes']) for line in all_lines)
     
-    # Normalizar todas las filas al mismo número de columnas
-    normalized_rows = []
-    for row in all_records:
-        if len(row) < max_cols:
-            row = list(row) + [''] * (max_cols - len(row))
-        else:
-            row = row[:max_cols]
-        normalized_rows.append(row)
+    # Crear filas normalizadas
+    rows = []
+    for line in all_lines:
+        row = line['partes']
+        if len(row) < max_parts:
+            row = list(row) + [''] * (max_parts - len(row))
+        rows.append(row[:max_parts])
     
     # Crear DataFrame
-    df = pd.DataFrame(normalized_rows)
+    df = pd.DataFrame(rows)
     
-    # Intentar detectar headers en la primera fila
-    if len(df) > 0:
-        # Usar la primera fila como header si parece serlo
-        first_row = df.iloc[0].tolist()
-        if any(isinstance(cell, str) and any(kw in cell.lower() for kw in ['total', 'valor', 'consumo', 'fecha', 'descripcion', 'concepto']) for cell in first_row):
-            df.columns = first_row
-            df = df.iloc[1:]
-        else:
-            # Crear headers genéricos
-            df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
-    
-    # Limpiar filas vacías
-    df = df.dropna(how='all')
-    df = df.reset_index(drop=True)
+    # Crear headers genéricos
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
     
     return df
 
 
-def detect_bank_statement(df: pd.DataFrame) -> bool:
-    """Detecta si el PDF es un estado de cuenta bancario"""
-    keywords = [
-        "balance", "saldo", "crédito", "débito", "credit", "debit",
-        "deposit", "retiro", "transferencia", "fecha", "date"
-    ]
+def extract_with_words(pdf_path: str) -> pd.DataFrame:
+    """Extrae texto usando palabras individuales con posiciones"""
+    all_rows = []
+    
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words()
+            if not words:
+                continue
+            
+            # Agrupar palabras por línea (posición Y similar)
+            lines = {}
+            for word in words:
+                y = round(word['top'], -1)  # Redondear a 10 pixels
+                if y not in lines:
+                    lines[y] = []
+                lines[y].append(word)
+            
+            # Ordenar líneas por Y
+            for y in sorted(lines.keys()):
+                line_words = sorted(lines[y], key=lambda w: w['x0'])
+                row = [w['text'] for w in line_words]
+                if row:
+                    all_rows.append(row)
+    
+    if not all_rows:
+        return pd.DataFrame()
+    
+    # Normalizar número de columnas
+    max_cols = max(len(row) for row in all_rows)
+    
+    normalized = []
+    for row in all_rows:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        normalized.append(row[:max_cols])
+    
+    df = pd.DataFrame(normalized)
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    return df
 
-    text = " ".join(str(col).lower() for col in df.columns)
-    matches = sum(1 for kw in keywords if kw in text)
-    return matches >= 3
+
+def extract_tables_traditional(pdf_path: str) -> pd.DataFrame:
+    """Extrae tablas de la forma tradicional"""
+    all_tables = []
+    
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            try:
+                tables = page.extract_tables()
+                for table in tables:
+                    if table and len(table) >= 2:
+                        # Limpiar tabla
+                        clean_table = []
+                        for row in table:
+                            clean_row = [str(cell).strip() if cell else '' for cell in row]
+                            if any(clean_row):
+                                clean_table.append(clean_row)
+                        if clean_table:
+                            all_tables.extend(clean_table)
+            except:
+                continue
+    
+    if not all_tables:
+        return pd.DataFrame()
+    
+    # Normalizar
+    max_cols = max(len(row) for row in all_tables)
+    
+    normalized = []
+    for row in all_tables:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        normalized.append(row[:max_cols])
+    
+    df = pd.DataFrame(normalized)
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    return df
+
+
+def smart_extract(pdf_path: str) -> pd.DataFrame:
+    """Intenta múltiples métodos de extracción y devuelve el mejor resultado"""
+    
+    # Método 1: Tablas tradicionales
+    df_tables = extract_tables_traditional(pdf_path)
+    
+    # Método 2: Texto estructurado por espacios
+    df_text = extract_all_text_structured(pdf_path)
+    
+    # Método 3: Palabras con posición
+    df_words = extract_with_words(pdf_path)
+    
+    # Elegir el mejor resultado (más datos)
+    results = [
+        ('tables', df_tables, len(df_tables) if not df_tables.empty else 0),
+        ('text', df_text, len(df_text) if not df_text.empty else 0),
+        ('words', df_words, len(df_words) if not df_words.empty else 0)
+    ]
+    
+    # Ordenar por número de filas
+    results.sort(key=lambda x: x[2], reverse=True)
+    
+    logger.info(f"Resultados: tables={results[0][2]} filas, text={results[1][2]} filas, words={results[2][2]} filas")
+    
+    # Devolver el mejor
+    best_method, best_df, _ = results[0]
+    
+    if best_df.empty:
+        return pd.DataFrame()
+    
+    logger.info(f"Mejor método: {best_method} con {len(best_df)} filas")
+    
+    return best_df
 
 
 @app.get("/")
 async def root():
-    return {
-        "message": "PDF to Excel Converter API",
-        "version": "1.0.6",
-        "status": "running"
-    }
+    return {"message": "PDF to Excel Converter API", "version": "2.0.0", "status": "running"}
 
 
 @app.get("/health")
@@ -180,43 +222,29 @@ async def health():
 
 @app.post("/api/convert")
 async def convert_pdf(file: UploadFile = File(...)):
-    """Convierte un PDF a Excel"""
-    logger.info(f"Recibiendo archivo: {file.filename}")
+    logger.info(f"Recibiendo: {file.filename}")
 
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
     try:
         content = await file.read()
-        logger.info(f"Archivo recibido: {len(content)} bytes")
-
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="El archivo está vacío")
-
         if not content.startswith(b'%PDF'):
-            raise HTTPException(status_code=400, detail="El archivo no es un PDF válido")
-
+            raise HTTPException(status_code=400, detail="No es un PDF válido")
     except Exception as e:
-        logger.error(f"Error leyendo archivo: {e}")
-        raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        logger.info(f"Procesando: {file.filename}")
-
-        tables = extract_tables_pdfplumber(tmp_path)
-        logger.info(f"Tablas encontradas: {len(tables)}")
+        df = smart_extract(tmp_path)
         
-        if not tables:
-            raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF")
-
-        df = clean_and_organize_invoice(tables)
-
         if df.empty:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos")
+            raise HTTPException(status_code=400, detail="No se pudo extraer contenido del PDF")
 
         logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
@@ -227,20 +255,17 @@ async def convert_pdf(file: UploadFile = File(...)):
             
             # Formatear
             worksheet = writer.sheets['Datos']
-            
-            # Auto-ajustar columnas
-            for idx, col in enumerate(df.columns):
+            for idx in range(len(df.columns)):
                 col_letter = get_column_letter(idx)
                 try:
-                    max_length = max(
-                        df[col].astype(str).map(len).max(),
-                        len(str(col))
+                    max_len = max(
+                        df.iloc[:, idx].astype(str).map(len).max(),
+                        len(str(df.columns[idx]))
                     )
-                    worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
+                    worksheet.column_dimensions[col_letter].width = min(max_len + 2, 60)
                 except:
-                    worksheet.column_dimensions[col_letter].width = 15
+                    worksheet.column_dimensions[col_letter].width = 20
             
-            # Agregar filtros
             worksheet.auto_filter.ref = worksheet.dimensions
 
         output.seek(0)
@@ -255,8 +280,8 @@ async def convert_pdf(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error procesando PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
+        logger.error(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -264,11 +289,10 @@ async def convert_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/preview")
 async def preview_pdf(file: UploadFile = File(...)):
-    """Vista previa del PDF"""
     logger.info(f"Preview: {file.filename}")
 
     if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
+        raise HTTPException(status_code=400, detail="Solo PDFs")
 
     try:
         content = await file.read()
@@ -282,24 +306,21 @@ async def preview_pdf(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        tables = extract_tables_pdfplumber(tmp_path)
+        df = smart_extract(tmp_path)
         
-        if not tables:
+        if df.empty:
             return {
                 "filename": file.filename,
                 "total_rows": 0,
-                "is_bank_statement": False,
                 "columns": [],
                 "preview": []
             }
-
-        df = clean_and_organize_invoice(tables)
+        
         preview = df.head(10).to_dict(orient='records')
-
+        
         return {
             "filename": file.filename,
             "total_rows": len(df),
-            "is_bank_statement": detect_bank_statement(df),
             "columns": list(df.columns),
             "preview": preview
         }

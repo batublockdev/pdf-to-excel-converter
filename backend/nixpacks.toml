@@ -2,7 +2,7 @@
 nixPkgs = ['python311', 'python311Packages.pip']
 
 [phases.install]
-cmds = ['python -m venv /opt/venv', '/opt/venv/bin/pip install --upgrade pip', '/opt/venv/bin/pip install fastapi uvicorn[standard] python-multipart pdfplumber pandas openpyxl google-generativeai python-dotenv']
+cmds = ['python -m venv /opt/venv', '/opt/venv/bin/pip install --upgrade pip', '/opt/venv/bin/pip install fastapi uvicorn[standard] python-multipart pdfplumber pandas openpyxl google-generativeai python-dotenv pikepdf requests']
 
 [start]
 cmd = '/opt/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT'

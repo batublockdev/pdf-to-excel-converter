@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="PDF to Excel Converter",
     description="Convierte estados de cuenta PDF a Excel limpio",
-    version="1.0.2"
+    version="1.0.3"
 )
 
 # CORS para frontend
@@ -69,20 +69,37 @@ def extract_tables_pdfplumber(pdf_path: str) -> List:
 def clean_table_data(tables: List) -> pd.DataFrame:
     """Limpia y consolida las tablas extraídas"""
     all_rows = []
+    max_columns = 0
+    header = None
 
     for table_info in tables:
         table = table_info["data"]
         if len(table) > 1:
+            # Usar la primera fila como header
+            if header is None and len(table[0]) > max_columns:
+                header = table[0]
+                max_columns = len(table[0])
+            
             for row in table[1:]:
                 if row and any(cell for cell in row if cell):
+                    # Normalizar longitud de filas
+                    if len(row) < max_columns:
+                        row = list(row) + [None] * (max_columns - len(row))
+                    elif len(row) > max_columns:
+                        row = row[:max_columns]
                     all_rows.append(row)
 
     if not all_rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
-    if len(tables) > 0 and len(tables[0]["data"]) > 0:
-        df.columns = tables[0]["data"][0]
+    if header and len(header) > 0:
+        # Asegurar que el header tenga la misma longitud
+        if len(header) < len(df.columns):
+            header = list(header) + [f"Columna_{i}" for i in range(len(header), len(df.columns))]
+        elif len(header) > len(df.columns):
+            header = header[:len(df.columns)]
+        df.columns = header
 
     return df
 
@@ -108,7 +125,7 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "status": "running"
     }
 
@@ -175,12 +192,12 @@ async def convert_pdf(file: UploadFile = File(...)):
 
             # Auto-ajustar columnas
             worksheet = writer.sheets['Datos']
-            for idx, col in enumerate(df.columns):
+            for idx in range(len(df.columns)):
                 col_letter = get_column_letter(idx)
                 try:
                     max_length = max(
-                        df[col].astype(str).map(len).max(),
-                        len(str(col))
+                        df.iloc[:, idx].astype(str).map(len).max(),
+                        len(str(df.columns[idx]))
                     )
                     worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
                 except:

@@ -97,7 +97,7 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "status": "running"
     }
 
@@ -110,11 +110,29 @@ async def health():
 @app.post("/api/convert")
 async def convert_pdf(file: UploadFile = File(...)):
     """Convierte un PDF a Excel"""
+    logger.info(f"Recibiendo archivo: {file.filename}, content_type: {file.content_type}")
+
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    # Leer contenido
+    try:
         content = await file.read()
+        logger.info(f"Archivo recibido: {len(content)} bytes")
+
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="El archivo está vacío")
+
+        # Verificar que sea un PDF válido (magic bytes)
+        if not content.startswith(b'%PDF'):
+            raise HTTPException(status_code=400, detail="El archivo no es un PDF válido")
+
+    except Exception as e:
+        logger.error(f"Error leyendo archivo: {e}")
+        raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
+
+    # Guardar temporalmente
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -122,7 +140,11 @@ async def convert_pdf(file: UploadFile = File(...)):
         logger.info(f"Procesando: {file.filename}")
 
         # Extraer tablas
-        tables = extract_tables_pdfplumber(tmp_path)
+        try:
+            tables = extract_tables_pdfplumber(tmp_path)
+        except Exception as e:
+            logger.error(f"Error extrayendo tablas: {e}")
+            raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
 
         if not tables:
             raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF")
@@ -176,16 +198,39 @@ async def convert_pdf(file: UploadFile = File(...)):
 @app.post("/api/preview")
 async def preview_pdf(file: UploadFile = File(...)):
     """Vista previa del PDF sin descargar"""
+    logger.info(f"Preview - Recibiendo archivo: {file.filename}, content_type: {file.content_type}")
+
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+    # Leer contenido
+    try:
         content = await file.read()
+        logger.info(f"Preview - Archivo recibido: {len(content)} bytes")
+
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="El archivo está vacío")
+
+        # Verificar que sea un PDF válido (magic bytes)
+        if not content.startswith(b'%PDF'):
+            raise HTTPException(status_code=400, detail="El archivo no es un PDF válido")
+
+    except Exception as e:
+        logger.error(f"Error leyendo archivo: {e}")
+        raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
+
+    # Guardar temporalmente
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        tables = extract_tables_pdfplumber(tmp_path)
+        try:
+            tables = extract_tables_pdfplumber(tmp_path)
+        except Exception as e:
+            logger.error(f"Error extrayendo tablas: {e}")
+            raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
+
         df = clean_table_data(tables)
 
         preview = df.head(10).to_dict(orient='records')
@@ -198,6 +243,11 @@ async def preview_pdf(file: UploadFile = File(...)):
             "preview": preview
         }
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en preview: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

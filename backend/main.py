@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="PDF to Excel Converter",
     description="Convierte estados de cuenta PDF a Excel limpio",
-    version="1.0.0"
+    version="1.0.1"
 )
 
 # CORS para frontend

@@ -36,6 +36,7 @@ __pycache__/
 *$py.class
 venv/
 env/
+test_env/
 *.egg-info/
 dist/
 build/

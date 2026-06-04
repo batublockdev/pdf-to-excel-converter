@@ -1,6 +1,6 @@
 """
-PDF to Excel Converter - Backend v2.0
-Convierte cualquier PDF a Excel extrayendo todo el contenido posible
+PDF to Excel Converter - Backend v2.1
+Convierte cualquier PDF a Excel, incluyendo PDFs escaneados (OCR)
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -13,13 +13,16 @@ import tempfile
 import os
 import logging
 import re
+import requests
+from PIL import Image
+import pdf2image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PDF to Excel Converter",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -29,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# OCR.space API (Free: 25,000 requests/mes)
+OCR_SPACE_API_KEY = "K87736648888957"  # Free public key
 
 
 def get_column_letter(idx: int) -> str:
@@ -41,8 +47,48 @@ def get_column_letter(idx: int) -> str:
     return result
 
 
+def ocr_space_extract(pdf_path: str) -> str:
+    """Extrae texto de PDF escaneado usando OCR.space API"""
+    try:
+        with open(pdf_path, 'rb') as f:
+            response = requests.post(
+                'https://api.ocr.space/parse/image',
+                files={'file': f},
+                data={
+                    'apikey': OCR_SPACE_API_KEY,
+                    'language': 'spa',  # Español
+                    'isOverlayRequired': 'false',
+                    'OCREngine': '2',  # Engine más preciso
+                },
+                timeout=60
+            )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('OCRExitCode') == 1:
+                text = result.get('ParsedResults', [{}])[0].get('ParsedText', '')
+                return text
+        return ""
+    except Exception as e:
+        logger.error(f"OCR error: {e}")
+        return ""
+
+
+def is_scanned_pdf(pdf_path: str) -> bool:
+    """Detecta si un PDF es escaneado (solo imágenes)"""
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages[:2]:
+                text = page.extract_text()
+                if text and len(text.strip()) > 50:
+                    return False
+        return True
+    except:
+        return True
+
+
 def extract_all_text_structured(pdf_path: str) -> pd.DataFrame:
-    """Extrae TODO el texto del PDF y lo organiza por líneas"""
+    """Extrae TODO el texto y lo organiza"""
     all_lines = []
     
     with pdfplumber.open(pdf_path) as pdf:
@@ -56,62 +102,45 @@ def extract_all_text_structured(pdf_path: str) -> pd.DataFrame:
                 line = line.strip()
                 if not line:
                     continue
-                
-                # Separar por múltiples espacios (común en PDFs)
                 parts = re.split(r'\s{2,}', line)
-                
-                # Limpiar partes vacías
                 parts = [p.strip() for p in parts if p.strip()]
-                
                 if parts:
-                    all_lines.append({
-                        'pagina': page_num + 1,
-                        'contenido': line,
-                        'partes': parts
-                    })
+                    all_lines.append(parts)
     
     if not all_lines:
         return pd.DataFrame()
     
-    # Encontrar el máximo número de columnas
-    max_parts = max(len(line['partes']) for line in all_lines)
+    max_parts = max(len(line) for line in all_lines)
     
-    # Crear filas normalizadas
     rows = []
     for line in all_lines:
-        row = line['partes']
-        if len(row) < max_parts:
-            row = list(row) + [''] * (max_parts - len(row))
-        rows.append(row[:max_parts])
+        if len(line) < max_parts:
+            line = list(line) + [''] * (max_parts - len(line))
+        rows.append(line[:max_parts])
     
-    # Crear DataFrame
     df = pd.DataFrame(rows)
-    
-    # Crear headers genéricos
     df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
     
     return df
 
 
 def extract_with_words(pdf_path: str) -> pd.DataFrame:
-    """Extrae texto usando palabras individuales con posiciones"""
+    """Extrae usando posiciones de palabras"""
     all_rows = []
     
     with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             words = page.extract_words()
             if not words:
                 continue
             
-            # Agrupar palabras por línea (posición Y similar)
             lines = {}
             for word in words:
-                y = round(word['top'], -1)  # Redondear a 10 pixels
+                y = round(word['top'], -1)
                 if y not in lines:
                     lines[y] = []
                 lines[y].append(word)
             
-            # Ordenar líneas por Y
             for y in sorted(lines.keys()):
                 line_words = sorted(lines[y], key=lambda w: w['x0'])
                 row = [w['text'] for w in line_words]
@@ -121,7 +150,6 @@ def extract_with_words(pdf_path: str) -> pd.DataFrame:
     if not all_rows:
         return pd.DataFrame()
     
-    # Normalizar número de columnas
     max_cols = max(len(row) for row in all_rows)
     
     normalized = []
@@ -137,30 +165,25 @@ def extract_with_words(pdf_path: str) -> pd.DataFrame:
 
 
 def extract_tables_traditional(pdf_path: str) -> pd.DataFrame:
-    """Extrae tablas de la forma tradicional"""
+    """Extrae tablas tradicionales"""
     all_tables = []
     
     with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             try:
                 tables = page.extract_tables()
                 for table in tables:
                     if table and len(table) >= 2:
-                        # Limpiar tabla
-                        clean_table = []
                         for row in table:
                             clean_row = [str(cell).strip() if cell else '' for cell in row]
                             if any(clean_row):
-                                clean_table.append(clean_row)
-                        if clean_table:
-                            all_tables.extend(clean_table)
+                                all_tables.append(clean_row)
             except:
                 continue
     
     if not all_tables:
         return pd.DataFrame()
     
-    # Normalizar
     max_cols = max(len(row) for row in all_tables)
     
     normalized = []
@@ -175,31 +198,70 @@ def extract_tables_traditional(pdf_path: str) -> pd.DataFrame:
     return df
 
 
+def ocr_text_to_dataframe(text: str) -> pd.DataFrame:
+    """Convierte texto OCR a DataFrame"""
+    if not text:
+        return pd.DataFrame()
+    
+    lines = text.split('\n')
+    all_rows = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Separar por espacios múltiples
+        parts = re.split(r'\s{2,}', line)
+        parts = [p.strip() for p in parts if p.strip()]
+        if parts:
+            all_rows.append(parts)
+    
+    if not all_rows:
+        return pd.DataFrame()
+    
+    max_cols = max(len(row) for row in all_rows)
+    
+    normalized = []
+    for row in all_rows:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        normalized.append(row[:max_cols])
+    
+    df = pd.DataFrame(normalized)
+    df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    return df
+
+
 def smart_extract(pdf_path: str) -> pd.DataFrame:
-    """Intenta múltiples métodos de extracción y devuelve el mejor resultado"""
+    """Extrae datos usando múltiples métodos, incluyendo OCR"""
     
-    # Método 1: Tablas tradicionales
+    # Verificar si es PDF escaneado
+    is_scanned = is_scanned_pdf(pdf_path)
+    logger.info(f"PDF escaneado: {is_scanned}")
+    
+    if is_scanned:
+        logger.info("Usando OCR para PDF escaneado...")
+        text = ocr_space_extract(pdf_path)
+        if text:
+            df = ocr_text_to_dataframe(text)
+            if not df.empty:
+                logger.info(f"OCR extrajo {len(df)} filas")
+                return df
+    
+    # Métodos tradicionales para PDFs con texto
     df_tables = extract_tables_traditional(pdf_path)
-    
-    # Método 2: Texto estructurado por espacios
     df_text = extract_all_text_structured(pdf_path)
-    
-    # Método 3: Palabras con posición
     df_words = extract_with_words(pdf_path)
     
-    # Elegir el mejor resultado (más datos)
     results = [
         ('tables', df_tables, len(df_tables) if not df_tables.empty else 0),
         ('text', df_text, len(df_text) if not df_text.empty else 0),
         ('words', df_words, len(df_words) if not df_words.empty else 0)
     ]
     
-    # Ordenar por número de filas
     results.sort(key=lambda x: x[2], reverse=True)
     
-    logger.info(f"Resultados: tables={results[0][2]} filas, text={results[1][2]} filas, words={results[2][2]} filas")
-    
-    # Devolver el mejor
     best_method, best_df, _ = results[0]
     
     if best_df.empty:
@@ -212,7 +274,7 @@ def smart_extract(pdf_path: str) -> pd.DataFrame:
 
 @app.get("/")
 async def root():
-    return {"message": "PDF to Excel Converter API", "version": "2.0.0", "status": "running"}
+    return {"message": "PDF to Excel Converter API", "version": "2.1.0", "status": "running", "ocr": "enabled"}
 
 
 @app.get("/health")
@@ -244,16 +306,14 @@ async def convert_pdf(file: UploadFile = File(...)):
         df = smart_extract(tmp_path)
         
         if df.empty:
-            raise HTTPException(status_code=400, detail="No se pudo extraer contenido del PDF")
+            raise HTTPException(status_code=400, detail="No se pudo extraer contenido del PDF. Si es un PDF escaneado, asegúrate de que tenga buena calidad.")
 
         logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
-        # Crear Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Datos')
             
-            # Formatear
             worksheet = writer.sheets['Datos']
             for idx in range(len(df.columns)):
                 col_letter = get_column_letter(idx)

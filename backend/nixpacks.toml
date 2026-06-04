@@ -1,8 +1,13 @@
 [phases.setup]
-nixPkgs = ['python311', 'python311Packages.pip', 'gcc', 'libffi', 'openssl', 'zlib']
+nixPkgs = ['python311', 'python311Packages.pip', 'python311Packages.virtualenv', 'gcc', 'libffi', 'openssl', 'zlib']
 
 [phases.install]
-cmds = ['pip install --upgrade pip', 'pip install -r requirements.txt']
+cmds = [
+  'python -m venv /opt/venv',
+  '. /opt/venv/bin/activate',
+  'pip install --upgrade pip setuptools wheel',
+  'pip install -r requirements.txt'
+]
 
 [start]
-cmd = 'uvicorn main:app --host 0.0.0.0 --port $PORT'
+cmd = 'cd /app && /opt/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT'

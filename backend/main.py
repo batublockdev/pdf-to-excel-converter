@@ -36,9 +36,9 @@ app.add_middleware(
 
 
 def get_column_letter(idx: int) -> str:
-    """Convierte índice a letra de columna de Excel (A, B, ..., Z, AA, AB, ...)"""
+    """Convierte índice a letra de columna de Excel"""
     result = ""
-    idx += 1  # Convertir a 1-indexed
+    idx += 1
     while idx > 0:
         idx -= 1
         result = chr(65 + idx % 26) + result
@@ -57,40 +57,34 @@ def extract_tables_pdfplumber(pdf_path: str) -> List:
                 tables = page.extract_tables()
                 if tables:
                     for table in tables:
-                        all_tables.append({
-                            "page": page_num + 1,
-                            "data": table,
-                            "type": "lined"
-                        })
+                        # Filtrar tablas muy pequeñas
+                        if len(table) >= 2:
+                            all_tables.append({
+                                "page": page_num + 1,
+                                "data": table,
+                                "type": "lined"
+                            })
 
-                # Estrategia 2: Tablas sin líneas (usando palabras)
-                if not tables or len(tables) == 0:
-                    words = page.extract_words()
-                    if words:
-                        # Agrupar palabras por líneas (y position)
-                        lines = {}
-                        for word in words:
-                            y = round(word['top'], 0)
-                            if y not in lines:
-                                lines[y] = []
-                            lines[y].append(word)
+                # Estrategia 2: Texto con patrones de factura
+                text = page.extract_text()
+                if text and (not tables or len(tables) == 0):
+                    # Detectar si es factura con patrones
+                    if any(kw in text for kw in ['Total', 'Consumo', 'Valor', '$', 'factura', 'periodo']):
+                        lines = text.split('\n')
+                        table_data = []
+                        for line in lines:
+                            if line.strip():
+                                # Separar por espacios múltiples o tabs
+                                parts = re.split(r'\s{2,}|\t', line.strip())
+                                if len(parts) >= 2:
+                                    table_data.append(parts)
                         
-                        # Ordenar líneas por posición y
-                        sorted_lines = sorted(lines.items(), key=lambda x: x[0])
-                        
-                        if len(sorted_lines) > 3:
-                            # Crear tabla a partir del texto
-                            table_data = []
-                            for y, line_words in sorted_lines[:50]:  # Limitar a 50 líneas
-                                row = [word['text'] for word in sorted(line_words, key=lambda w: w['x0'])]
-                                table_data.append(row)
-                            
-                            if table_data:
-                                all_tables.append({
-                                    "page": page_num + 1,
-                                    "data": table_data,
-                                    "type": "text-based"
-                                })
+                        if len(table_data) >= 2:
+                            all_tables.append({
+                                "page": page_num + 1,
+                                "data": table_data,
+                                "type": "text-invoice"
+                            })
 
             except Exception as e:
                 logger.warning(f"Error en página {page_num}: {e}")
@@ -99,41 +93,62 @@ def extract_tables_pdfplumber(pdf_path: str) -> List:
     return all_tables
 
 
-def clean_table_data(tables: List) -> pd.DataFrame:
-    """Limpia y consolida las tablas extraídas"""
-    all_rows = []
-    max_columns = 0
-    header = None
-
+def clean_and_organize_invoice(tables: List) -> pd.DataFrame:
+    """Organiza datos de factura en formato limpio"""
+    all_records = []
+    
     for table_info in tables:
         table = table_info["data"]
-        if len(table) > 1:
-            # Usar la primera fila como header
-            if header is None and len(table[0]) > max_columns:
-                header = table[0]
-                max_columns = len(table[0])
+        
+        for row in table:
+            if not row or not any(cell for cell in row if cell):
+                continue
             
-            for row in table[1:]:
-                if row and any(cell for cell in row if cell):
-                    # Normalizar longitud de filas
-                    if len(row) < max_columns:
-                        row = list(row) + [None] * (max_columns - len(row))
-                    elif len(row) > max_columns:
-                        row = row[:max_columns]
-                    all_rows.append(row)
-
-    if not all_rows:
+            # Limpiar celdas
+            clean_row = []
+            for cell in row:
+                if cell:
+                    cell = str(cell).strip()
+                    # Limpiar caracteres extraños
+                    cell = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', cell)
+                    clean_row.append(cell)
+            
+            if clean_row:
+                all_records.append(clean_row)
+    
+    if not all_records:
         return pd.DataFrame()
-
-    df = pd.DataFrame(all_rows)
-    if header and len(header) > 0:
-        # Asegurar que el header tenga la misma longitud
-        if len(header) < len(df.columns):
-            header = list(header) + [f"Columna_{i}" for i in range(len(header), len(df.columns))]
-        elif len(header) > len(df.columns):
-            header = header[:len(df.columns)]
-        df.columns = header
-
+    
+    # Encontrar el número máximo de columnas
+    max_cols = max(len(row) for row in all_records)
+    
+    # Normalizar todas las filas al mismo número de columnas
+    normalized_rows = []
+    for row in all_records:
+        if len(row) < max_cols:
+            row = list(row) + [''] * (max_cols - len(row))
+        else:
+            row = row[:max_cols]
+        normalized_rows.append(row)
+    
+    # Crear DataFrame
+    df = pd.DataFrame(normalized_rows)
+    
+    # Intentar detectar headers en la primera fila
+    if len(df) > 0:
+        # Usar la primera fila como header si parece serlo
+        first_row = df.iloc[0].tolist()
+        if any(isinstance(cell, str) and any(kw in cell.lower() for kw in ['total', 'valor', 'consumo', 'fecha', 'descripcion', 'concepto']) for cell in first_row):
+            df.columns = first_row
+            df = df.iloc[1:]
+        else:
+            # Crear headers genéricos
+            df.columns = [f"Columna_{i+1}" for i in range(len(df.columns))]
+    
+    # Limpiar filas vacías
+    df = df.dropna(how='all')
+    df = df.reset_index(drop=True)
+    
     return df
 
 
@@ -141,15 +156,10 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
     """Detecta si el PDF es un estado de cuenta bancario"""
     keywords = [
         "balance", "saldo", "crédito", "débito", "credit", "debit",
-        "deposit", "retiro", "transferencia", "fecha", "date",
-        "descripcion", "description", "referencia", "reference"
+        "deposit", "retiro", "transferencia", "fecha", "date"
     ]
 
     text = " ".join(str(col).lower() for col in df.columns)
-    if len(df) > 0:
-        for row in df.head(3).values:
-            text += " ".join(str(cell).lower() for cell in row if cell)
-
     matches = sum(1 for kw in keywords if kw in text)
     return matches >= 3
 
@@ -158,7 +168,7 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "1.0.5",
+        "version": "1.0.6",
         "status": "running"
     }
 
@@ -171,12 +181,11 @@ async def health():
 @app.post("/api/convert")
 async def convert_pdf(file: UploadFile = File(...)):
     """Convierte un PDF a Excel"""
-    logger.info(f"Recibiendo archivo: {file.filename}, content_type: {file.content_type}")
+    logger.info(f"Recibiendo archivo: {file.filename}")
 
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
-    # Leer contenido
     try:
         content = await file.read()
         logger.info(f"Archivo recibido: {len(content)} bytes")
@@ -184,7 +193,6 @@ async def convert_pdf(file: UploadFile = File(...)):
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="El archivo está vacío")
 
-        # Verificar que sea un PDF válido (magic bytes)
         if not content.startswith(b'%PDF'):
             raise HTTPException(status_code=400, detail="El archivo no es un PDF válido")
 
@@ -192,7 +200,6 @@ async def convert_pdf(file: UploadFile = File(...)):
         logger.error(f"Error leyendo archivo: {e}")
         raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
 
-    # Guardar temporalmente
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
@@ -200,57 +207,49 @@ async def convert_pdf(file: UploadFile = File(...)):
     try:
         logger.info(f"Procesando: {file.filename}")
 
-        # Extraer tablas
-        try:
-            tables = extract_tables_pdfplumber(tmp_path)
-            logger.info(f"Tablas encontradas: {len(tables)}")
-            for t in tables:
-                logger.info(f"  - Página {t['page']}: {len(t['data'])} filas, tipo: {t['type']}")
-        except Exception as e:
-            logger.error(f"Error extrayendo tablas: {e}")
-            raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
-
+        tables = extract_tables_pdfplumber(tmp_path)
+        logger.info(f"Tablas encontradas: {len(tables)}")
+        
         if not tables:
-            raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF. Si es un estado de cuenta, intenta exportarlo como PDF con tablas o texto seleccionable.")
+            raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF")
 
-        # Limpiar y consolidar
-        df = clean_table_data(tables)
+        df = clean_and_organize_invoice(tables)
 
         if df.empty:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos del PDF")
+            raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos")
 
         logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
-        # Crear Excel en memoria
+        # Crear Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Datos')
-
-            # Auto-ajustar columnas
+            
+            # Formatear
             worksheet = writer.sheets['Datos']
-            for idx in range(len(df.columns)):
+            
+            # Auto-ajustar columnas
+            for idx, col in enumerate(df.columns):
                 col_letter = get_column_letter(idx)
                 try:
                     max_length = max(
-                        df.iloc[:, idx].astype(str).map(len).max(),
-                        len(str(df.columns[idx]))
+                        df[col].astype(str).map(len).max(),
+                        len(str(col))
                     )
                     worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
                 except:
                     worksheet.column_dimensions[col_letter].width = 15
+            
+            # Agregar filtros
+            worksheet.auto_filter.ref = worksheet.dimensions
 
         output.seek(0)
-
-        # Generar nombre de archivo
         excel_filename = file.filename.replace('.pdf', '.xlsx')
 
-        # Devolver como descarga
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={
-                "Content-Disposition": f'attachment; filename="{excel_filename}"'
-            }
+            headers={"Content-Disposition": f'attachment; filename="{excel_filename}"'}
         )
 
     except HTTPException:
@@ -265,53 +264,36 @@ async def convert_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/preview")
 async def preview_pdf(file: UploadFile = File(...)):
-    """Vista previa del PDF sin descargar"""
-    logger.info(f"Preview - Recibiendo archivo: {file.filename}, content_type: {file.content_type}")
+    """Vista previa del PDF"""
+    logger.info(f"Preview: {file.filename}")
 
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
-    # Leer contenido
     try:
         content = await file.read()
-        logger.info(f"Preview - Archivo recibido: {len(content)} bytes")
-
-        if len(content) == 0:
-            raise HTTPException(status_code=400, detail="El archivo está vacío")
-
-        # Verificar que sea un PDF válido (magic bytes)
-        if not content.startswith(b'%PDF'):
-            raise HTTPException(status_code=400, detail="El archivo no es un PDF válido")
-
+        if len(content) == 0 or not content.startswith(b'%PDF'):
+            raise HTTPException(status_code=400, detail="PDF inválido")
     except Exception as e:
-        logger.error(f"Error leyendo archivo: {e}")
-        raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
-    # Guardar temporalmente
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        try:
-            tables = extract_tables_pdfplumber(tmp_path)
-            logger.info(f"Preview - Tablas encontradas: {len(tables)}")
-        except Exception as e:
-            logger.error(f"Error extrayendo tablas: {e}")
-            raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
-
+        tables = extract_tables_pdfplumber(tmp_path)
+        
         if not tables:
             return {
                 "filename": file.filename,
                 "total_rows": 0,
                 "is_bank_statement": False,
                 "columns": [],
-                "preview": [],
-                "warning": "No se detectaron tablas. El PDF puede contener texto sin formato de tabla."
+                "preview": []
             }
 
-        df = clean_table_data(tables)
-
+        df = clean_and_organize_invoice(tables)
         preview = df.head(10).to_dict(orient='records')
 
         return {
@@ -322,11 +304,6 @@ async def preview_pdf(file: UploadFile = File(...)):
             "preview": preview
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error en preview: {e}")
-        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

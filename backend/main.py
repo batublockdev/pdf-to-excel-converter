@@ -14,8 +14,6 @@ import os
 import logging
 import re
 import requests
-from PIL import Image
-import pdf2image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

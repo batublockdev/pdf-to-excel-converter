@@ -12,6 +12,7 @@ from io import BytesIO
 import tempfile
 import os
 import logging
+import re
 from typing import List
 
 # Configuración
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="PDF to Excel Converter",
     description="Convierte estados de cuenta PDF a Excel limpio",
-    version="1.0.4"
+    version="1.0.5"
 )
 
 # CORS para frontend
@@ -46,19 +47,51 @@ def get_column_letter(idx: int) -> str:
 
 
 def extract_tables_pdfplumber(pdf_path: str) -> List:
-    """Extrae tablas usando pdfplumber"""
+    """Extrae tablas usando pdfplumber con múltiples estrategias"""
     all_tables = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
             try:
+                # Estrategia 1: Tablas con líneas
                 tables = page.extract_tables()
                 if tables:
                     for table in tables:
                         all_tables.append({
                             "page": page_num + 1,
-                            "data": table
+                            "data": table,
+                            "type": "lined"
                         })
+
+                # Estrategia 2: Tablas sin líneas (usando palabras)
+                if not tables or len(tables) == 0:
+                    words = page.extract_words()
+                    if words:
+                        # Agrupar palabras por líneas (y position)
+                        lines = {}
+                        for word in words:
+                            y = round(word['top'], 0)
+                            if y not in lines:
+                                lines[y] = []
+                            lines[y].append(word)
+                        
+                        # Ordenar líneas por posición y
+                        sorted_lines = sorted(lines.items(), key=lambda x: x[0])
+                        
+                        if len(sorted_lines) > 3:
+                            # Crear tabla a partir del texto
+                            table_data = []
+                            for y, line_words in sorted_lines[:50]:  # Limitar a 50 líneas
+                                row = [word['text'] for word in sorted(line_words, key=lambda w: w['x0'])]
+                                table_data.append(row)
+                            
+                            if table_data:
+                                all_tables.append({
+                                    "page": page_num + 1,
+                                    "data": table_data,
+                                    "type": "text-based"
+                                })
+
             except Exception as e:
                 logger.warning(f"Error en página {page_num}: {e}")
                 continue
@@ -125,7 +158,7 @@ def detect_bank_statement(df: pd.DataFrame) -> bool:
 async def root():
     return {
         "message": "PDF to Excel Converter API",
-        "version": "1.0.3",
+        "version": "1.0.5",
         "status": "running"
     }
 
@@ -170,18 +203,21 @@ async def convert_pdf(file: UploadFile = File(...)):
         # Extraer tablas
         try:
             tables = extract_tables_pdfplumber(tmp_path)
+            logger.info(f"Tablas encontradas: {len(tables)}")
+            for t in tables:
+                logger.info(f"  - Página {t['page']}: {len(t['data'])} filas, tipo: {t['type']}")
         except Exception as e:
             logger.error(f"Error extrayendo tablas: {e}")
             raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
 
         if not tables:
-            raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF")
+            raise HTTPException(status_code=400, detail="No se encontraron tablas en el PDF. Si es un estado de cuenta, intenta exportarlo como PDF con tablas o texto seleccionable.")
 
         # Limpiar y consolidar
         df = clean_table_data(tables)
 
         if df.empty:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos")
+            raise HTTPException(status_code=400, detail="No se pudieron extraer datos válidos del PDF")
 
         logger.info(f"Convertido: {len(df)} filas, {len(df.columns)} columnas")
 
@@ -259,9 +295,20 @@ async def preview_pdf(file: UploadFile = File(...)):
     try:
         try:
             tables = extract_tables_pdfplumber(tmp_path)
+            logger.info(f"Preview - Tablas encontradas: {len(tables)}")
         except Exception as e:
             logger.error(f"Error extrayendo tablas: {e}")
             raise HTTPException(status_code=400, detail=f"Error procesando PDF: {str(e)}")
+
+        if not tables:
+            return {
+                "filename": file.filename,
+                "total_rows": 0,
+                "is_bank_statement": False,
+                "columns": [],
+                "preview": [],
+                "warning": "No se detectaron tablas. El PDF puede contener texto sin formato de tabla."
+            }
 
         df = clean_table_data(tables)
 

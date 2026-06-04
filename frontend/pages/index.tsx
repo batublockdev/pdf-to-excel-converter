@@ -9,6 +9,8 @@ export default function Home() {
   const [progress, setProgress] = useState(0)
   const [previewData, setPreviewData] = useState<any>(null)
   const [error, setError] = useState<string | null>(null)
+  const [mode, setMode] = useState<'raw' | 'analysis'>('raw')
+  const [password, setPassword] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -19,6 +21,30 @@ export default function Home() {
       setPreviewData(null)
     } else {
       setError('Por favor selecciona un archivo PDF válido')
+    }
+  }
+
+  const handlePreview = async () => {
+    if (!file) return
+
+    const formData = new FormData()
+    formData.append('file', file)
+    if (password) {
+      formData.append('password', password)
+    }
+
+    try {
+      const response = await axios.post(`${API_URL}/api/preview`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      setPreviewData(response.data)
+    } catch (err: any) {
+      console.error('Preview error:', err)
+      if (err.response?.data?.detail?.includes('contraseña')) {
+        setPreviewData({ encrypted: true })
+      } else {
+        setError(err.response?.data?.detail || 'Error al previsualizar')
+      }
     }
   }
 
@@ -34,21 +60,13 @@ export default function Home() {
 
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('mode', mode)
+    if (password) {
+      formData.append('password', password)
+    }
 
     try {
-      // Preview
-      const previewResponse = await axios.post(`${API_URL}/api/preview`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (progressEvent) => {
-          const percent = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1))
-          setProgress(percent)
-        }
-      })
-
-      setPreviewData(previewResponse.data)
-
-      // Convert
-      const convertResponse = await axios.post(`${API_URL}/api/convert`, formData, {
+      const response = await axios.post(`${API_URL}/api/convert`, formData, {
         responseType: 'blob',
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) => {
@@ -58,10 +76,13 @@ export default function Home() {
       })
 
       // Download
-      const url = window.URL.createObjectURL(new Blob([convertResponse.data]))
+      const url = window.URL.createObjectURL(new Blob([response.data]))
       const link = document.createElement('a')
       link.href = url
-      link.setAttribute('download', file.name.replace('.pdf', '.xlsx'))
+      const filename = mode === 'analysis' 
+        ? file.name.replace('.pdf', '_analisis.xlsx')
+        : file.name.replace('.pdf', '.xlsx')
+      link.setAttribute('download', filename)
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -117,6 +138,75 @@ export default function Home() {
             <p>Máximo 50MB • Soporta cualquier formato de tabla</p>
           </div>
 
+          {/* Password Input */}
+          {(previewData?.encrypted || file) && (
+            <div style={{ marginTop: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>
+                🔐 Contraseña del PDF (si está protegido):
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Dejar vacío si no tiene contraseña"
+                style={{
+                  width: '100%',
+                  padding: '0.75rem',
+                  borderRadius: '0.5rem',
+                  border: '1px solid #e5e7eb',
+                  fontSize: '1rem'
+                }}
+              />
+            </div>
+          )}
+
+          {/* Mode Selection */}
+          {file && (
+            <div style={{ marginTop: '1.5rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.75rem', fontWeight: 600, fontSize: '1.1rem' }}>
+                Elige el modo de conversión:
+              </label>
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setMode('raw')}
+                  style={{
+                    flex: 1,
+                    minWidth: '200px',
+                    padding: '1rem 1.5rem',
+                    borderRadius: '0.75rem',
+                    border: mode === 'raw' ? '2px solid #3b82f6' : '2px solid #e5e7eb',
+                    background: mode === 'raw' ? '#eff6ff' : 'white',
+                    cursor: 'pointer',
+                    textAlign: 'left' as const
+                  }}
+                >
+                  <div style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>📊 Modo Raw</div>
+                  <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                    Excel con todos los datos extraídos tal como están
+                  </div>
+                </button>
+                <button
+                  onClick={() => setMode('analysis')}
+                  style={{
+                    flex: 1,
+                    minWidth: '200px',
+                    padding: '1rem 1.5rem',
+                    borderRadius: '0.75rem',
+                    border: mode === 'analysis' ? '2px solid #10b981' : '2px solid #e5e7eb',
+                    background: mode === 'analysis' ? '#ecfdf5' : 'white',
+                    cursor: 'pointer',
+                    textAlign: 'left' as const
+                  }}
+                >
+                  <div style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>💡 Modo Análisis</div>
+                  <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                    Excel organizado: categorías, gastos, ingresos y resumen
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Error */}
           {error && (
             <div className="error-message">
@@ -138,19 +228,39 @@ export default function Home() {
           )}
 
           {/* Preview */}
-          {previewData && !uploading && (
+          {previewData && !previewData.encrypted && !uploading && (
             <div className="preview-card">
               <h4>📋 Vista Previa: {previewData.filename}</h4>
               <p><strong>Total de filas:</strong> {previewData.total_rows}</p>
-              <p><strong>Tipo detectado:</strong> {previewData.is_bank_statement ? 'Estado de cuenta bancario' : 'Documento con tablas'}</p>
-              <p><strong>Columnas:</strong> {previewData.columns?.join(', ')}</p>
+              <p><strong>Columnas:</strong> {previewData.columns?.slice(0, 5).join(', ')}{previewData.columns?.length > 5 ? '...' : ''}</p>
+            </div>
+          )}
+
+          {/* Encrypted Warning */}
+          {previewData?.encrypted && (
+            <div style={{ 
+              marginTop: '1rem', 
+              padding: '1rem', 
+              background: '#fef3c7', 
+              borderRadius: '0.5rem',
+              color: '#92400e'
+            }}>
+              🔒 Este PDF está protegido con contraseña. Ingresa la contraseña arriba.
             </div>
           )}
 
           {/* Convert Button */}
           {file && !uploading && (
-            <button className="convert-button" onClick={handleUpload}>
-              📊 Convertir a Excel
+            <button 
+              className="convert-button" 
+              onClick={handleUpload}
+              style={{
+                background: mode === 'analysis' 
+                  ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                  : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'
+              }}
+            >
+              {mode === 'analysis' ? '💡 Analizar y Crear Excel' : '📊 Convertir a Excel'}
             </button>
           )}
         </div>
@@ -170,9 +280,9 @@ export default function Home() {
           </div>
 
           <div className="feature-card">
-            <div className="feature-icon">🌍</div>
-            <h3>Multi-idioma</h3>
-            <p>Soporta español, inglés, portugués, francés y más. Funciona con bancos de todo el mundo.</p>
+            <div className="feature-icon">💡</div>
+            <h3>Análisis Inteligente</h3>
+            <p>Modo análisis que categoriza gastos, detecta ingresos y crea resúmenes automáticos.</p>
           </div>
         </div>
 
@@ -188,8 +298,8 @@ export default function Home() {
 
             <div className="step">
               <div className="step-number">2</div>
-              <h3>Procesamos</h3>
-              <p>Nuestra IA detecta y extrae las tablas automáticamente con precisión.</p>
+              <h3>Elige el modo</h3>
+              <p>Raw para datos completos, o Análisis para Excel organizado con categorías.</p>
             </div>
 
             <div className="step">
@@ -200,28 +310,53 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Supported Formats */}
+        <div style={{ maxWidth: '1200px', margin: '0 auto 3rem', padding: '0 1rem' }}>
+          <h2 style={{ textAlign: 'center', marginBottom: '1.5rem' }}>PDFs Soportados</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1rem' }}>
+            {[
+              { icon: '🏦', title: 'Estados de Cuenta', desc: 'Bancolombia, Davivienda, BBVA, etc.' },
+              { icon: '📄', title: 'Facturas', desc: 'EPM, Claro, servicios públicos' },
+              { icon: '📊', title: 'Reportes', desc: 'Cualquier PDF con tablas' },
+              { icon: '🔐', title: 'PDFs Protegidos', desc: 'Con contraseña' },
+              { icon: '📷', title: 'PDFs Escaneados', desc: 'Usamos OCR para extraer texto' },
+            ].map((item, i) => (
+              <div key={i} style={{
+                padding: '1rem',
+                background: 'white',
+                borderRadius: '0.75rem',
+                border: '1px solid #e5e7eb'
+              }}>
+                <span style={{ fontSize: '1.5rem' }}>{item.icon}</span>
+                <h4 style={{ marginTop: '0.5rem' }}>{item.title}</h4>
+                <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>{item.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* FAQ */}
         <div className="faq-section">
           <h2>Preguntas Frecuentes</h2>
           <div className="faq-grid">
             <div className="faq-item">
               <h3>¿Es realmente gratis?</h3>
-              <p>Sí, durante la fase beta puedes convertir hasta 50 PDFs gratis. Después habrá planes gratuitos y de pago.</p>
+              <p>Sí, puedes convertir hasta 25 PDFs gratis al mes. Para más volumen hay planes de pago.</p>
             </div>
 
             <div className="faq-item">
               <h3>¿Qué tipos de PDF acepta?</h3>
-              <p>Estados de cuenta bancarios, facturas, tablas financieras, reportes - cualquier PDF con datos tabulares.</p>
+              <p>Estados de cuenta, facturas, tablas financieras, PDFs escaneados y protegidos con contraseña.</p>
             </div>
 
             <div className="faq-item">
-              <h3>¿Dónde se guardan mis archivos?</h3>
-              <p>No se guardan en ningún lado. Se procesan en memoria y se eliminan inmediatamente después de la conversión.</p>
+              <h3>¿Qué es el Modo Análisis?</h3>
+              <p>Organiza automáticamente tus gastos por categorías, detecta ingresos y crea un resumen financiero.</p>
             </div>
 
             <div className="faq-item">
-              <h3>¿Funciona con bancos latinoamericanos?</h3>
-              <p>Sí, soportamos Bancolombia, BBVA, Davivienda, Banorte, Santander, y más de 3000 bancos mundialmente.</p>
+              <h3>¿Mis datos están seguros?</h3>
+              <p>Sí, se procesan en memoria y se eliminan inmediatamente. No guardamos nada.</p>
             </div>
           </div>
         </div>
